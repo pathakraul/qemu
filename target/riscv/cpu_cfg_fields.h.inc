@@ -165,6 +165,9 @@ BOOL_FIELD(misa_w)
 
 BOOL_FIELD(short_isa_string)
 
+BOOL_FIELD(ext_smmpt)
+BOOL_FIELD(ext_smsdid)
+
 TYPED_FIELD(uint32_t, mvendorid, 0)
 TYPED_FIELD(uint64_t, marchid, 0)
 TYPED_FIELD(uint64_t, mimpid, 0)
@@ -179,6 +182,15 @@ TYPED_FIELD(uint8_t,  pmp_regions, 0)
 TYPED_FIELD(uint32_t, pmp_granularity, 0)
 
 TYPED_FIELD(int8_t, max_satp_mode, -1)
+
+/*
+ * mpt_mode_mask: bitmask of MODE values which are supported by implementation.
+ * mptsdidlen: requested number of implemented SDID bits, 0..SDIDMAX(6).
+ * mptmode: requested highest MODE value to advertise.
+ */
+TYPED_FIELD(uint32_t, mpt_mode_mask, 0)
+TYPED_FIELD(uint8_t,  mptsdidlen,    0)
+TYPED_FIELD(uint8_t,  mptmode,       0)
 
 #undef BOOL_FIELD
 #undef TYPED_FIELD

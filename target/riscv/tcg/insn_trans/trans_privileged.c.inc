@@ -160,3 +160,28 @@ static bool trans_sfence_vma(DisasContext *ctx, arg_sfence_vma *a)
 #endif
     return false;
 }
+
+static bool do_mfence_pa(DisasContext *ctx)
+{
+    bool ok = false;
+
+#ifndef CONFIG_USER_ONLY
+    if (ctx->cfg_ptr->ext_smsdid && ctx->priv == PRV_M) {
+        decode_save_opc(ctx, 0);
+        gen_helper_tlb_flush(tcg_env);
+        ok = true;
+    }
+#endif
+    return ok;
+}
+
+static bool trans_mfence_pa(DisasContext *ctx, arg_mfence_pa *a)
+{
+    return do_mfence_pa(ctx);
+}
+
+static bool trans_minval_pa(DisasContext *ctx, arg_minval_pa *a)
+{
+    return do_mfence_pa(ctx);
+}
+

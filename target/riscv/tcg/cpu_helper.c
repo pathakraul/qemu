@@ -38,6 +38,7 @@
 #include "target/riscv/tcg/debug.h"
 #include "pmp.h"
 #include "qemu/plugin.h"
+#include "riscv_smmpt.h"
 
 int riscv_env_mmu_index(CPURISCVState *env, bool ifetch)
 {
@@ -892,6 +893,36 @@ void riscv_cpu_set_mode(CPURISCVState *env, privilege_mode_t newpriv,
 }
 
 /*
+ * get_physical_address_mpt() -- check Smmpt MPT permission.
+ *
+ * Handles the three conditions under which MPT is inactive per
+ * spec.
+ * 1. ext_smmpt not set  -> grant all (no MPT hardware)
+ * 2. mptmode == Bare    -> grant all (MPT disabled)
+ * 3. mode == PRV_M      -> grant all (M-mode exempt)
+ */
+static int get_physical_address_mpt(CPURISCVState *env, int *prot,
+                                     hwaddr addr, MMUAccessType access_type,
+                                     privilege_mode_t mode)
+{
+//    fprintf(stderr, "MPT gate: ext=%d mptmode=%d priv=%d\n", riscv_cpu_cfg(env)->ext_smmpt, env->mptmode, mode);
+    if (!riscv_cpu_cfg(env)->ext_smmpt || env->mptmode == MMPT_MODE_BARE) {
+        *prot = PAGE_READ | PAGE_WRITE | PAGE_EXEC;
+        return TRANSLATE_SUCCESS;
+    }
+    if (mode == PRV_M) {
+        *prot = PAGE_READ | PAGE_WRITE | PAGE_EXEC;
+        return TRANSLATE_SUCCESS;
+    }
+    if (!smmpt_check_access(env, addr, prot, access_type)) {
+        *prot = 0;
+        return TRANSLATE_MPT_FAIL;
+    }
+
+    return TRANSLATE_SUCCESS;
+}
+
+/*
  * get_physical_address_pmp - check PMP permission for this physical address
  *
  * Match the PMP region and check permission for this physical address and it's
@@ -903,7 +934,7 @@ void riscv_cpu_set_mode(CPURISCVState *env, privilege_mode_t newpriv,
  * @access_type: The type of MMU access
  * @mode: Indicates current privilege level.
  */
-static int get_physical_address_pmp(CPURISCVState *env, int *prot, hwaddr addr,
+int get_physical_address_pmp(CPURISCVState *env, int *prot, hwaddr addr,
                                     int size, MMUAccessType access_type,
                                     privilege_mode_t mode)
 {
@@ -1172,6 +1203,20 @@ static int get_physical_address(CPURISCVState *env, hwaddr *physical,
             pte_addr = vbase + idx * ptesize;
         } else {
             pte_addr = base + idx * ptesize;
+        }
+
+        /*
+         * MPT check on this PTE's physical address (implicit access).
+         * Mode remauins PRV_S because the walk is on behalf of S/U-mode not M-mode.
+         */
+        int mpt_prot;
+        int mpt_ret = get_physical_address_mpt(env, &mpt_prot, pte_addr,
+                                               MMU_DATA_LOAD, PRV_S);
+        if (mpt_ret != TRANSLATE_SUCCESS) {
+            qemu_log_mask(CPU_LOG_MMU,
+                          "%s MPT blocked PTE " HWADDR_FMT_plx "\n",
+                          __func__, pte_addr);
+            return mpt_ret;
         }
 
         int pmp_prot;
@@ -1657,7 +1702,7 @@ bool riscv_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
     CPURISCVState *env = &cpu->env;
     vaddr im_address;
     hwaddr pa = 0;
-    int prot, prot2, prot_pmp;
+    int prot, prot2, prot_pmp, mpt_prot;
     bool pmp_pma_violation = false;
     bool first_stage_error = true;
     bool two_stage_lookup = mmuidx_2stage(mmu_idx);
@@ -1710,6 +1755,20 @@ bool riscv_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
             prot &= prot2;
 
             if (ret == TRANSLATE_SUCCESS) {
+                /*
+                 * MPT check on final PA.
+                 * MPT and PMP both must allow access.
+                 */
+                ret = get_physical_address_mpt(env, &mpt_prot, pa,
+                                               access_type, mode);
+                qemu_log_mask(CPU_LOG_MMU,
+                              "%s MPT 2stage " HWADDR_FMT_plx
+                              " ret %d prot %d\n",
+                              __func__, pa, ret, mpt_prot);
+                prot &= mpt_prot;
+            }
+
+            if (ret == TRANSLATE_SUCCESS) {
                 ret = get_physical_address_pmp(env, &prot_pmp, pa,
                                                size, access_type, mode);
                 tlb_size = pmp_get_tlb_size(env, pa);
@@ -1726,7 +1785,7 @@ bool riscv_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
                  * level exception
                  */
                 first_stage_error = false;
-                if (ret != TRANSLATE_PMP_FAIL) {
+                if (ret != TRANSLATE_PMP_FAIL && ret != TRANSLATE_MPT_FAIL) {
                     env->guest_phys_fault_addr = (im_address |
                                                   (address &
                                                    (TARGET_PAGE_SIZE - 1))) >> 2;
@@ -1745,6 +1804,19 @@ bool riscv_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
                       __func__, address, ret, pa, prot);
 
         if (ret == TRANSLATE_SUCCESS) {
+            /*
+             * MPT check on final PA.
+             */
+            ret = get_physical_address_mpt(env, &mpt_prot, pa,
+                                           access_type, mode);
+            qemu_log_mask(CPU_LOG_MMU,
+                          "%s MPT single " HWADDR_FMT_plx
+                          " ret %d prot %d\n",
+                          __func__, pa, ret, mpt_prot);
+            prot &= mpt_prot;
+        }
+
+        if (ret == TRANSLATE_SUCCESS) {
             ret = get_physical_address_pmp(env, &prot_pmp, pa,
                                            size, access_type, mode);
             tlb_size = pmp_get_tlb_size(env, pa);
@@ -1758,7 +1830,7 @@ bool riscv_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
         }
     }
 
-    if (ret == TRANSLATE_PMP_FAIL || ret == TRANSLATE_PMA_FAIL) {
+    if (ret == TRANSLATE_PMP_FAIL || ret == TRANSLATE_PMA_FAIL || ret == TRANSLATE_MPT_FAIL) {
         pmp_pma_violation = true;
     }
 

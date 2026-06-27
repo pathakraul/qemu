@@ -139,6 +139,7 @@ enum {
     TRANSLATE_PMP_FAIL,
     TRANSLATE_G_STAGE_FAIL,
     TRANSLATE_PMA_FAIL,
+    TRANSLATE_MPT_FAIL
 };
 
 /* Extension context status */
@@ -521,6 +522,14 @@ struct CPUArchState {
     uint64_t rnmip;
     uint64_t rnmi_irqvec;
     uint64_t rnmi_excpvec;
+
+    /*
+    * Smsdid mmpt runtime CSR state
+    */
+    uint32_t mptmode;
+    uint32_t sdid;
+    uint64_t mptppn;
+
 #endif
 
     /* Fields from here on are preserved across CPU reset. */

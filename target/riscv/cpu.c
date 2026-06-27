@@ -266,7 +266,9 @@ const RISCVIsaExtData isa_edata_arr[] = {
     ISA_EXT_DATA_ENTRY(smpmpmt, PRIV_VERSION_1_12_0, ext_smpmpmt),
     ISA_EXT_DATA_ENTRY(smrnmi, PRIV_VERSION_1_12_0, ext_smrnmi),
     ISA_EXT_DATA_ENTRY(smmpm, PRIV_VERSION_1_13_0, ext_smmpm),
+    ISA_EXPERIMENTAL_EXT_DATA_ENTRY(smmpt, PRIV_VERSION_1_13_0, ext_smmpt),
     ISA_EXT_DATA_ENTRY(smnpm, PRIV_VERSION_1_13_0, ext_smnpm),
+    ISA_EXPERIMENTAL_EXT_DATA_ENTRY(smsdid, PRIV_VERSION_1_13_0, ext_smsdid),
     ISA_EXT_DATA_ENTRY(smstateen, PRIV_VERSION_1_12_0, ext_smstateen),
     ISA_EXT_DATA_ENTRY(ssaia, PRIV_VERSION_1_12_0, ext_ssaia),
     ISA_EXT_DATA_ENTRY(ssccfg, PRIV_VERSION_1_13_0, ext_ssccfg),
@@ -1189,6 +1191,52 @@ static void riscv_cpu_satp_mode_finalize(RISCVCPU *cpu, Error **errp)
 
     cpu->cfg.max_satp_mode = satp_mode_map_max;
 }
+
+/*
+ * riscv_cpu_smsdid_finalize() - cross-field validation for Smsdid/Smmpt.
+ *
+ * Each field in mmpt csr is WARL allowing each field when written
+ * does not affect the other fields in csr and its the responsibility
+ * of the software to program the fields as per the specification.
+ * 
+ */
+static void riscv_cpu_smsdid_finalize(RISCVCPU *cpu, Error **errp)
+{
+    CPURISCVState *env = &cpu->env;
+
+    if (cpu->cfg.ext_smmpt && !cpu->cfg.ext_smsdid) {
+        error_setg(errp, "smmpt requires smsdid to be enabled");
+        return;
+    }
+
+    if (cpu->cfg.ext_smsdid && !cpu->cfg.ext_smmpt) {
+        error_setg(errp, "smsdid requires smmpt to be enabled");
+        return;
+    }
+
+    if (!cpu->cfg.ext_smsdid) {
+        return;  /* neither enabled, nothing to validate */
+    }
+  
+    if (cpu->cfg.mptsdidlen > MMPT_SDIDMAX) {
+        error_setg(errp, "mptsdidlen %u exceeds SDIDMAX (%d)",
+                   cpu->cfg.mptsdidlen, MMPT_SDIDMAX);
+        return;
+    }
+
+    if (!(cpu->cfg.mpt_mode_mask & BIT(cpu->cfg.mptmode))) {
+        error_setg(errp,
+                   "mptmode %u is not implemented by this emulation "
+                   "(mpt_mode_mask=0x%x)",
+                   cpu->cfg.mptmode, cpu->cfg.mpt_mode_mask);
+        return;
+    }
+
+    /* Keep BARE mode by default unless mptmode from qemu cli overrides it */
+    env->mptmode = cpu->cfg.mptmode ? cpu->cfg.mptmode : MMPT_MODE_BARE;
+    env->sdid = 0;
+    env->mptppn = 0;
+}
 #endif
 
 void riscv_cpu_finalize_features(RISCVCPU *cpu, Error **errp)
@@ -1200,6 +1248,14 @@ void riscv_cpu_finalize_features(RISCVCPU *cpu, Error **errp)
     if (local_err != NULL) {
         error_propagate(errp, local_err);
         return;
+    }
+
+    if (cpu->cfg.ext_smsdid || cpu->cfg.ext_smmpt) {
+        riscv_cpu_smsdid_finalize(cpu, &local_err);
+        if (local_err != NULL) {
+            error_propagate(errp, local_err);
+            return;
+        }
     }
 #endif
 
@@ -1443,6 +1499,10 @@ static void riscv_cpu_init(Object *obj)
 #endif
     cpu->env.vext_ver = VEXT_VERSION_1_00_0;
     cpu->cfg.max_satp_mode = -1;
+
+    cpu->cfg.mpt_mode_mask = MMPT_MODE_MASK_SUPPORTED;
+    cpu->cfg.mptmode = MMPT_MODE_DEFAULT;
+    cpu->cfg.mptsdidlen = MMPT_SDIDMAX;
 
     if (mcc->def->profile) {
         mcc->def->profile->enabled = true;
@@ -2218,6 +2278,76 @@ static const PropertyInfo prop_marchid = {
 };
 
 /*
+ * prop_mptsdidlen: requested number of implemented SDID bits.
+ *
+ * Example: -cpu rv64,x-smsdid=on,x-smmpt=on,mptsdidlen=4
+ */
+static void prop_mptsdidlen_set(Object *obj, Visitor *v, const char *name,
+                                void *opaque, Error **errp)
+{
+    RISCVCPU *cpu = RISCV_CPU(obj);
+    uint8_t value;
+
+    if (!visit_type_uint8(v, name, &value, errp)) {
+        return;
+    }
+    if (value > MMPT_SDIDMAX) {
+        error_setg(errp, "mptsdidlen %u exceeds SDIDMAX (%d)",
+                   value, MMPT_SDIDMAX);
+        return;
+    }
+    cpu->cfg.mptsdidlen = value;
+}
+
+static void prop_mptsdidlen_get(Object *obj, Visitor *v, const char *name,
+                                void *opaque, Error **errp)
+{
+    uint8_t value = RISCV_CPU(obj)->cfg.mptsdidlen;
+    visit_type_uint8(v, name, &value, errp);
+}
+
+static const PropertyInfo prop_mptsdidlen = {
+    .description = "mptsdidlen",
+    .get = prop_mptsdidlen_get,
+    .set = prop_mptsdidlen_set,
+};
+
+/*
+ * prop_mptmode: requested highest MODE value to advertise.
+ *
+ * Example: -cpu rv64,x-smsdid=on,x-smmpt=on,mptmode=1
+ */
+static void prop_mptmode_set(Object *obj, Visitor *v, const char *name,
+                             void *opaque, Error **errp)
+{
+    RISCVCPU *cpu = RISCV_CPU(obj);
+    uint8_t value;
+
+    if (!visit_type_uint8(v, name, &value, errp)) {
+        return;
+    }
+    if (value >= MMPT_MODE_SMMPT_MAX) {
+        error_setg(errp, "mptmode %u out of range (MODE field is 4 bits)",
+                   value);
+        return;
+    }
+    cpu->cfg.mptmode = value;
+}
+
+static void prop_mptmode_get(Object *obj, Visitor *v, const char *name,
+                             void *opaque, Error **errp)
+{
+    uint8_t value = RISCV_CPU(obj)->cfg.mptmode;
+    visit_type_uint8(v, name, &value, errp);
+}
+
+static const PropertyInfo prop_mptmode = {
+    .description = "mptmode",
+    .get = prop_mptmode_get,
+    .set = prop_mptmode_set,
+};
+
+/*
  * RVA22U64 defines some 'named features' that are cache
  * related: Za64rs, Zic64b, Ziccif, Ziccrse, Ziccamoa
  * and Zicclsm. They are always implemented in TCG and
@@ -2860,6 +2990,8 @@ static const Property riscv_cpu_properties[] = {
     {.name = "mvendorid", .info = &prop_mvendorid},
     {.name = "mimpid", .info = &prop_mimpid},
     {.name = "marchid", .info = &prop_marchid},
+    {.name = "mptsdidlen", .info = &prop_mptsdidlen},
+    {.name = "mptmode",    .info = &prop_mptmode},
 
 #ifndef CONFIG_USER_ONLY
     DEFINE_PROP_UINT64("resetvec", RISCVCPU, env.resetvec, DEFAULT_RSTVEC),

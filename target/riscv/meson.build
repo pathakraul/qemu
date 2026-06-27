@@ -26,6 +26,7 @@ riscv_system_ss.add(files(
   'machine.c',
   'time_helper.c',
   'riscv-qmp-cmds.c',
+  'riscv_smmpt.c',
 ))
 
 subdir('tcg')

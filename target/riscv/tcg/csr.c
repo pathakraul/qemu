@@ -821,6 +821,19 @@ static RISCVException rnmi(CPURISCVState *env, int csrno)
 
     return RISCV_EXCP_ILLEGAL_INST;
 }
+
+/*
+ * smsdid() - predicate for mmpt and msdcfg CSRs.
+ *
+ * When Smsdid is implemented, both CSRs must be implemented.
+ */
+static RISCVException smsdid(CPURISCVState *env, int csrno)
+{
+    if (riscv_cpu_cfg(env)->ext_smsdid) {
+        return RISCV_EXCP_NONE;
+    }
+    return RISCV_EXCP_ILLEGAL_INST;
+}
 #endif
 
 static RISCVException seed(CPURISCVState *env, int csrno)
@@ -5568,6 +5581,132 @@ static RISCVException write_mnstatus(CPURISCVState *env, int csrno,
     return RISCV_EXCP_NONE;
 }
 
+/*
+ * read_mmpt() - assemble mmpt CSR value from env runtime state.
+ */
+static RISCVException read_mmpt(CPURISCVState *env, int csrno,
+                                target_ulong *val)
+{
+    if (riscv_cpu_xlen(env) == 32) {
+        uint32_t value = 0;
+
+        value |= (env->mptmode << MMPT_MODE_SHIFT_32) & MMPT_MODE_MASK_32;
+        value |= ((uint32_t)env->sdid << MMPT_SDID_SHIFT_32) & MMPT_SDID_MASK_32;
+        value |= (uint32_t)env->mptppn & MMPT_PPN_MASK_32;
+
+        *val = value;
+
+    } else if (riscv_cpu_xlen(env) == 64) {
+        uint64_t value_64 = 0;
+        uint64_t ppn = env->mptppn & MMPT_PPN_MASK_64;
+
+        /* Smmpt64 PPN bits [2:0] always read zero */
+        if (env->mptmode == MMPT_MODE_SMMPT64) {
+            ppn &= ~0x7ULL;
+        }
+
+        value_64 |= ((uint64_t)env->mptmode << MMPT_MODE_SHIFT_64)
+                    & MMPT_MODE_MASK_64;
+        value_64 |= ((uint64_t)env->sdid << MMPT_SDID_SHIFT_64)
+                    & MMPT_SDID_MASK_64;
+        value_64 |= ppn;
+
+        *val = value_64;
+
+    } else {
+        return RISCV_EXCP_ILLEGAL_INST;
+    }
+    return RISCV_EXCP_NONE;
+}
+
+/*
+ * write_mmpt() - WARL write handler using the three-aspect WARL model.
+ *
+ * The supported + configured values for SMMPT are read directly from cfg.
+ * cfg->mpt_mode_mask -- which MODE values this QEMU table
+ *                       walker implements (fixed, set at init)
+ * cfg->mptmode       -- highest MODE this platform advertises
+ *                       (default = full cfg->mpt_mode_mask capability,
+ *                       may be lowered by -cpu mptmode=N)
+ * cfg->mptsdidlen    -- how many SDID bits this platform advertises
+ *
+ * The active values of SMMPT (env->mptmode/sdid/mptppn) are updated here.
+ */
+static RISCVException write_mmpt(CPURISCVState *env, int csrno,
+                                 target_ulong val, uintptr_t ra)
+{
+    const RISCVCPUConfig *cfg = riscv_cpu_cfg(env);
+    uint32_t sdid_mask = MMPT_SDID_IMPL_MASK(cfg->mptsdidlen);
+    uint32_t mode;
+    uint32_t old_mptmode = env->mptmode;
+    uint32_t old_sdid    = env->sdid;
+    uint64_t old_mptppn  = env->mptppn;
+
+    if (riscv_cpu_xlen(env) == 32) {
+        mode = (val & MMPT_MODE_MASK_32) >> MMPT_MODE_SHIFT_32;
+
+        /*
+         * MODE(WARL) - accept only if this emulation implements it (mpt_mode_mask)\
+         * and this platform advertises it (<= cfg->mptmode). Otherwise silently
+         * retain the previous active value.
+         */
+        if (cfg->mpt_mode_mask & BIT(mode)) {
+            env->mptmode = mode;
+        }
+
+        /* SDID(WARL) - mask to implemented bits only */
+        env->sdid = ((val & MMPT_SDID_MASK_32) >> MMPT_SDID_SHIFT_32)
+                    & sdid_mask;
+        env->mptppn = val & MMPT_PPN_MASK_32;
+
+    }
+    else if (riscv_cpu_xlen(env) == 64) {
+        mode = (val & MMPT_MODE_MASK_64) >> MMPT_MODE_SHIFT_64;
+
+        /* MODE(WARL) - same rule as RV32 above */
+        if (cfg->mpt_mode_mask & BIT(mode)) {
+            env->mptmode = mode;
+        }
+
+        /* SDID(WARL) - mask to implemented bits only */
+        env->sdid = ((val & MMPT_SDID_MASK_64) >> MMPT_SDID_SHIFT_64)
+                    & sdid_mask;
+        env->mptppn = val & MMPT_PPN_MASK_64;
+
+        /*
+         * Smmpt64 PPN alignment - bits [2:0] of PPN always read zero.
+         */
+        if (env->mptmode == MMPT_MODE_SMMPT64) {
+            env->mptppn &= ~0x7ULL;
+        }
+    } else {
+        return RISCV_EXCP_ILLEGAL_INST;
+    }
+
+    if (env->mptmode != old_mptmode || env->sdid != old_sdid || env->mptppn != old_mptppn) {
+        tlb_flush(env_cpu(env));
+    }
+
+    return RISCV_EXCP_NONE;
+}
+
+/*
+ * msdcfg (CSR 0x74E)
+ */
+static RISCVException read_msdcfg(CPURISCVState *env, int csrno,
+                                   target_ulong *val)
+{
+    *val = 0;
+    return RISCV_EXCP_NONE;
+}
+
+static RISCVException write_msdcfg(CPURISCVState *env, int csrno,
+                                    target_ulong val, uintptr_t ra)
+{
+    /* Fully read-only zero until a field-defining extension exists. */
+    return RISCV_EXCP_NONE;
+}
+
 #endif
 
 /* Crypto Extension */
@@ -6769,6 +6908,9 @@ riscv_csr_operations csr_ops[CSR_TABLE_SIZE] = {
                              write_mhpmcounterh                         },
     [CSR_SCOUNTOVF]      = { "scountovf", sscofpmf,  read_scountovf,
                              .min_priv_ver = PRIV_VERSION_1_12_0 },
+
+    [CSR_MMPT]   = { "mmpt",   smsdid, read_mmpt,   write_mmpt   },
+    [CSR_MSDCFG] = { "msdcfg", smsdid, read_msdcfg, write_msdcfg },
 
 #endif /* !CONFIG_USER_ONLY */
 };

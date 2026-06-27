@@ -1166,4 +1166,66 @@ typedef enum CTRType {
 #define MCONTEXT64                         0x0000000000001FFFULL
 #define MCONTEXT32_HCONTEXT                0x0000007F
 #define MCONTEXT64_HCONTEXT                0x0000000000003FFFULL
+
+/*
+ * Smsdid: Supervisor Domain Identifier and Protection Register
+ *
+ * CSR numbers:
+ * mmpt   0x382  M-mode read/write
+ * msdcfg 0x74E  M-mode read/write
+ */
+#define CSR_MMPT                0x382
+#define CSR_MSDCFG               0x74E
+
+/*
+ * RV32 mmpt field layout:
+ * [31:30] MODE  2 bits  (WARL)
+ * [29:28] 0     2 bits  (WARL, reserved)
+ * [27:22] SDID  6 bits  (WARL: only mptsdidlen LSBs writable)
+ * [21: 0] PPN  22 bits  (WARL)
+ */
+#define MMPT_MODE_SHIFT_32       30
+#define MMPT_SDID_SHIFT_32       22
+#define MMPT_MODE_MASK_32        (0x3UL  << MMPT_MODE_SHIFT_32)
+#define MMPT_SDID_MASK_32        (0x3FUL << MMPT_SDID_SHIFT_32)
+#define MMPT_PPN_MASK_32         0x003FFFFFUL
+
+/*
+ * RV64 mmpt field layout:
+ * [63:60] MODE  4 bits  (WARL)
+ * [59:58] 0     2 bits  (WARL, reserved)
+ * [57:52] SDID  6 bits  (WARL: only mptsdidlen LSBs writable)
+ * [51:44] 0     8 bits  (WARL, reserved)
+ * [43: 0] PPN  44 bits  (WARL)
+ */
+#define MMPT_MODE_SHIFT_64       60
+#define MMPT_SDID_SHIFT_64       52
+#define MMPT_MODE_MASK_64        (0xFULL  << MMPT_MODE_SHIFT_64)
+#define MMPT_SDID_MASK_64        (0x3FULL << MMPT_SDID_SHIFT_64)
+#define MMPT_PPN_MASK_64         0x00000FFFFFFFFFFFULL  /* 44 bits */
+
+/* SMMPT MODE encodings. */
+#define MMPT_MODE_BARE            0
+#define MMPT_MODE_SMMPT34         1   /* RV32 only */
+#define MMPT_MODE_SMMPT43         1   /* RV64 only */
+#define MMPT_MODE_SMMPT52         2   /* RV64 only */
+#define MMPT_MODE_SMMPT64         3   /* RV64 only */
+#define MMPT_MODE_SMMPT_MAX       4
+
+/* SDIDMAX: maximum implemented SDID bits */
+#define MMPT_SDIDMAX              6
+
+/* WARL helper: bitmask of bits implemented when sdidlen bits of SDID
+ * are wired up. */
+#define MMPT_SDID_IMPL_MASK(n)   ((1U << (n)) - 1U)
+
+#ifdef TARGET_RISCV32
+#define MMPT_MODE_MASK_SUPPORTED    (BIT(MMPT_MODE_BARE) | BIT(MMPT_MODE_SMMPT34))
+#define MMPT_MODE_DEFAULT           MMPT_MODE_BARE
+#else
+#define MMPT_MODE_MASK_SUPPORTED    (BIT(MMPT_MODE_BARE) |      \
+                                    BIT(MMPT_MODE_SMMPT43) |    \
+                                    BIT(MMPT_MODE_SMMPT52))
+#define MMPT_MODE_DEFAULT           MMPT_MODE_BARE
+#endif
 #endif
